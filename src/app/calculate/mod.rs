@@ -32,18 +32,25 @@ fn heuristic(
     color_weight: i64,
     spatial_weight: i64,
 ) -> i64 {
-    let spatial = (apos.0 as i64 - bpos.0 as i64).pow(2) + (apos.1 as i64 - bpos.1 as i64).pow(2);
-    let color = (a.0 as i64 - b.0 as i64).pow(2)
-        + (a.1 as i64 - b.1 as i64).pow(2)
-        + (a.2 as i64 - b.2 as i64).pow(2);
-    color * color_weight + (spatial * spatial_weight).pow(2)
+    let dx = apos.0 as i64 - bpos.0 as i64;
+    let dy = apos.1 as i64 - bpos.1 as i64;
+    let spatial = dx * dx + dy * dy;
+
+    let dr = a.0 as i64 - b.0 as i64;
+    let dg = a.1 as i64 - b.1 as i64;
+    let db = a.2 as i64 - b.2 as i64;
+    let color = dr * dr + dg * dg + db * db;
+
+    let weighted_spatial = spatial * spatial_weight;
+    color * color_weight + weighted_spatial * weighted_spatial
 }
 
 struct ImgDiffWeights<'a> {
     source: Vec<(u8, u8, u8)>,
     target: Vec<(u8, u8, u8)>,
+    source_positions: Vec<(u16, u16)>,
+    target_positions: Vec<(u16, u16)>,
     weights: Vec<i64>,
-    sidelen: usize,
     settings: &'a GenerationSettings,
 }
 
@@ -61,8 +68,8 @@ impl Weights<i64> for ImgDiffWeights<'_> {
 
     #[inline(always)]
     fn at(&self, row: usize, col: usize) -> i64 {
-        let (x1, y1) = (row % self.sidelen, row / self.sidelen);
-        let (x2, y2) = (col % self.sidelen, col / self.sidelen);
+        let (x1, y1) = self.target_positions[row];
+        let (x2, y2) = self.source_positions[col];
         let (r1, g1, b1) = self.target[row];
         let (r2, g2, b2) = self.source[col];
         let weight = self.weights[row];
@@ -125,11 +132,19 @@ pub fn process_optimal<S: ProgressSink>(
     // let start_time = std::time::Instant::now();
     let (source_pixels, target_pixels, weights) = util::get_images(source_img, &settings)?;
 
+    let sidelen = settings.sidelen as usize;
+    let source_positions: Vec<_> = (0..source_pixels.len())
+        .map(|idx| ((idx % sidelen) as u16, (idx / sidelen) as u16))
+        .collect();
+    let target_positions: Vec<_> = (0..target_pixels.len())
+        .map(|idx| ((idx % sidelen) as u16, (idx / sidelen) as u16))
+        .collect();
     let weights = ImgDiffWeights {
         source: source_pixels.clone(),
         target: target_pixels,
+        source_positions,
+        target_positions,
         weights,
-        sidelen: settings.sidelen as usize,
         settings: &settings,
     };
 
@@ -158,6 +173,7 @@ pub fn process_optimal<S: ProgressSink>(
         let mut alternating = Vec::with_capacity(ny);
         let mut slack = vec![0; ny];
         let mut slackx = Vec::with_capacity(ny);
+        let mut assignment_preview = vec![0usize; nx];
         for root in 0..nx {
             alternating.clear();
             alternating.resize(ny, None);
@@ -248,14 +264,10 @@ pub fn process_optimal<S: ProgressSink>(
 
                 tx.send(ProgressMsg::Progress(root as f32 / nx as f32));
 
-                let data = make_new_img(
-                    &source_pixels,
-                    &xy.clone()
-                        .into_iter()
-                        .map(|a| a.unwrap_or(0))
-                        .collect::<Vec<_>>(),
-                    settings.sidelen,
-                );
+                for (slot, value) in assignment_preview.iter_mut().zip(xy.iter()) {
+                    *slot = value.unwrap_or(0);
+                }
+                let data = make_new_img(&source_pixels, &assignment_preview, settings.sidelen);
 
                 tx.send(ProgressMsg::UpdatePreview {
                     width: settings.sidelen,
