@@ -11,7 +11,7 @@ pub const GIF_FRAMERATE: u32 = 8;
 pub const GIF_RESOLUTION: u32 = 400;
 pub const GIF_MAX_FRAMES: u32 = 140;
 pub const GIF_MIN_FRAMES: u32 = 100;
-pub const GIF_MAX_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+pub const GIF_MAX_SIZE: usize = 45 * 1024 * 1024; // 45 MB
 pub const GIF_SPEED: f32 = 1.5;
 pub const GIF_PALETTE_SAMPLEFAC: i32 = 1;
 

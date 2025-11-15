@@ -691,7 +691,7 @@ impl App for ObamifyApp {
                                                     [slider_w, 20.0],
                                                     egui::Slider::new(
                                                         &mut settings.sidelen,
-                                                        64..=256,
+                                                        64..=512,
                                                     )
                                                     .text("resolution"),
                                                 );
