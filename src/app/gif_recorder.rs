@@ -1,4 +1,5 @@
 #[cfg(not(target_arch = "wasm32"))]
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -47,6 +48,8 @@ pub struct GifRecorder {
     pub frame_count: u32,
     inflight: Option<InFlight>,
     should_stop: bool,
+    rgba_buffer: Vec<u8>,
+    quantized_buffer: Vec<u8>,
 }
 
 impl GifRecorder {
@@ -59,6 +62,8 @@ impl GifRecorder {
             frame_count: 0,
             inflight: None,
             should_stop: false,
+            rgba_buffer: Vec::new(),
+            quantized_buffer: Vec::new(),
         }
     }
 
@@ -70,7 +75,7 @@ impl GifRecorder {
         self.status.not_recording()
     }
 
-    fn poll_inflight(&mut self) -> Option<Vec<u8>> {
+    fn poll_inflight(&mut self) -> bool {
         if let Some(inflight) = &self.inflight {
             if inflight.ready.load(std::sync::atomic::Ordering::Acquire) {
                 let slice = inflight.buffer.slice(..);
@@ -83,55 +88,66 @@ impl GifRecorder {
                 let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT; // 256
                 let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
 
-                let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+                let total_bytes = (width * height * bpp) as usize;
+                self.rgba_buffer.resize(total_bytes, 0);
                 for y in 0..height as usize {
                     let start = y * padded_bytes_per_row as usize;
                     let end = start + unpadded_bytes_per_row as usize;
-                    rgba.extend_from_slice(&mapped[start..end]);
+                    let dst_start = y * unpadded_bytes_per_row as usize;
+                    let dst_end = dst_start + unpadded_bytes_per_row as usize;
+                    self.rgba_buffer[dst_start..dst_end].copy_from_slice(&mapped[start..end]);
                 }
                 drop(mapped);
                 inflight.buffer.unmap();
                 self.inflight = None;
-                Some(rgba)
+                true
             } else {
-                None
+                false
             }
         } else {
-            None
+            false
         }
     }
 
     pub fn try_write_frame(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
-        if let Some(rgba) = self.poll_inflight() {
-            if let Some(encoder) = &mut self.encoder {
-                let nq = self.palette.as_ref().unwrap();
-                let pixels: Vec<u8> = rgba
-                    .chunks_exact(4)
-                    .map(|pix| nq.index_of(pix) as u8)
-                    .collect();
-                let mut frame = gif::Frame::from_indexed_pixels(
-                    GIF_RESOLUTION as u16,
-                    GIF_RESOLUTION as u16,
-                    pixels,
-                    None,
-                );
-                let frame_size = encoder.get_ref().len() + frame.buffer.len() + 32; // idk if this is exact but its a conservative estimate
-                if frame_size > GIF_MAX_SIZE {
-                    self.should_stop = true;
-                    return Ok(true);
-                }
-
-                frame.delay = ((100.0 / GIF_FRAMERATE as f32) / GIF_SPEED) as u16; // delay in 1/100 sec
-                encoder.write_frame(&frame)?;
-
-                Ok(true)
-            } else {
-                // shouldn't happen
-                Err("No encoder".into())
-            }
-        } else {
-            Ok(false)
+        if !self.poll_inflight() {
+            return Ok(false);
         }
+
+        let Some(encoder) = &mut self.encoder else {
+            return Err("No encoder".into());
+        };
+        let nq = self.palette.as_ref().unwrap();
+        let pixel_count = (GIF_RESOLUTION * GIF_RESOLUTION) as usize;
+        let mut pixels = std::mem::take(&mut self.quantized_buffer);
+        pixels.resize(pixel_count, 0);
+        for (dst, chunk) in pixels.iter_mut().zip(self.rgba_buffer.chunks_exact(4)) {
+            *dst = nq.index_of(chunk) as u8;
+        }
+
+        let mut frame = gif::Frame::default();
+        frame.width = GIF_RESOLUTION as u16;
+        frame.height = GIF_RESOLUTION as u16;
+        frame.buffer = Cow::Owned(pixels);
+        frame.delay = ((100.0 / GIF_FRAMERATE as f32) / GIF_SPEED) as u16; // delay in 1/100 sec
+
+        let frame_size = encoder.get_ref().len() + frame.buffer.len() + 32; // conservative estimate
+        if frame_size > GIF_MAX_SIZE {
+            self.quantized_buffer = match frame.buffer {
+                Cow::Owned(buf) => buf,
+                Cow::Borrowed(_) => Vec::new(),
+            };
+            self.should_stop = true;
+            return Ok(true);
+        }
+
+        encoder.write_frame(&frame)?;
+        self.quantized_buffer = match frame.buffer {
+            Cow::Owned(buf) => buf,
+            Cow::Borrowed(_) => Vec::new(),
+        };
+
+        Ok(true)
     }
 
     pub fn init_encoder(
