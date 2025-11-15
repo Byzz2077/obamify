@@ -138,8 +138,7 @@ pub fn drawing_process_genetic(
     let source_img =
         image::ImageBuffer::from_raw(source.width, source.height, source.source_img.clone())
             .unwrap();
-    let (source_pixels, target_pixels, weights) =
-        calculate::util::get_images(source_img, &settings)?;
+    let (source_pixels, target_pixels) = calculate::util::get_images(source_img, &settings)?;
 
     let mut pixels = {
         let read_colors: Vec<SeedColor> = colors.read().unwrap().clone();
@@ -154,8 +153,8 @@ pub fn drawing_process_genetic(
                 let mut p = DrawingPixel::new(x, y, 0);
                 let h = p.calc_drawing_heuristic(
                     (x, y),
-                    target_pixels[i],
-                    weights[i],
+                    target_pixels[i].rgb_tuple(),
+                    target_pixels[i].weight,
                     &read_colors,
                     settings.proximity_importance,
                     // &read_pixel_data,
@@ -210,16 +209,16 @@ pub fn drawing_process_genetic(
 
             let a_on_b_h = pixels[apos].calc_drawing_heuristic(
                 (bx, by),
-                t_b,
-                weights[bpos],
+                t_b.rgb_tuple(),
+                t_b.weight,
                 &colors,
                 settings.proximity_importance,
             ) + stroke_reward(bpos, apos, &pixel_data, &pixels, frame_count);
 
             let b_on_a_h = pixels[bpos].calc_drawing_heuristic(
                 (ax, ay),
-                t_a,
-                weights[apos],
+                t_a.rgb_tuple(),
+                t_a.weight,
                 &colors,
                 settings.proximity_importance,
             ) + stroke_reward(apos, bpos, &pixel_data, &pixels, frame_count);
