@@ -51,24 +51,80 @@ where
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[derive(Clone, Copy, Debug)]
+pub struct GridPixel {
+    pub x: u16,
+    pub y: u16,
+    pub rgb: [u8; 3],
+}
+
+impl GridPixel {
+    #[inline]
+    pub fn new(x: u32, y: u32, rgb: [u8; 3]) -> Self {
+        Self {
+            x: x as u16,
+            y: y as u16,
+            rgb,
+        }
+    }
+
+    #[inline]
+    pub fn coords(&self) -> (u16, u16) {
+        (self.x, self.y)
+    }
+
+    #[inline]
+    pub fn rgb_tuple(&self) -> (u8, u8, u8) {
+        (self.rgb[0], self.rgb[1], self.rgb[2])
+    }
+
+    #[inline]
+    pub fn linear_index(&self, sidelen: u32) -> usize {
+        self.y as usize * sidelen as usize + self.x as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct WeightedPixel {
+    pub pixel: GridPixel,
+    pub weight: i64,
+}
+
+impl WeightedPixel {
+    #[inline]
+    pub fn coords(&self) -> (u16, u16) {
+        self.pixel.coords()
+    }
+
+    #[inline]
+    pub fn rgb_tuple(&self) -> (u8, u8, u8) {
+        self.pixel.rgb_tuple()
+    }
+}
+
 pub(crate) fn get_images(
     source: SourceImg,
     settings: &GenerationSettings,
-) -> Result<(Vec<(u8, u8, u8)>, Vec<(u8, u8, u8)>, Vec<i64>), Box<dyn Error>> {
+) -> Result<(Vec<GridPixel>, Vec<WeightedPixel>), Box<dyn Error>> {
     let source = settings.source_crop_scale.apply(&source, settings.sidelen);
+    let (target, weights) = settings.get_target()?;
+
     let source_pixels = source
-        .pixels()
-        .map(|p| (p[0], p[1], p[2]))
+        .enumerate_pixels()
+        .map(|(x, y, pixel)| GridPixel::new(x, y, pixel.0))
         .collect::<Vec<_>>();
 
-    let (target, weights) = settings.get_target()?;
     let target_pixels = target
-        .pixels()
-        .map(|p| (p[0], p[1], p[2]))
+        .enumerate_pixels()
+        .zip(weights.into_iter())
+        .map(|((x, y, pixel), weight)| WeightedPixel {
+            pixel: GridPixel::new(x, y, pixel.0),
+            weight,
+        })
         .collect::<Vec<_>>();
+
     assert_eq!(source_pixels.len(), target_pixels.len());
-    Ok((source_pixels, target_pixels, weights))
+    Ok((source_pixels, target_pixels))
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq)]

@@ -16,7 +16,7 @@ fn _debug_print(s: String) {
 
 use crate::app::calculate::util::Algorithm;
 use crate::app::{
-    calculate::util::{GenerationSettings, ProgressSink},
+    calculate::util::{GenerationSettings, GridPixel, ProgressSink, WeightedPixel},
     preset::{Preset, UnprocessedPreset},
 };
 use egui::ahash::AHasher;
@@ -32,18 +32,22 @@ fn heuristic(
     color_weight: i64,
     spatial_weight: i64,
 ) -> i64 {
-    let spatial = (apos.0 as i64 - bpos.0 as i64).pow(2) + (apos.1 as i64 - bpos.1 as i64).pow(2);
-    let color = (a.0 as i64 - b.0 as i64).pow(2)
-        + (a.1 as i64 - b.1 as i64).pow(2)
-        + (a.2 as i64 - b.2 as i64).pow(2);
-    color * color_weight + (spatial * spatial_weight).pow(2)
+    let dx = apos.0 as i64 - bpos.0 as i64;
+    let dy = apos.1 as i64 - bpos.1 as i64;
+    let spatial = dx * dx + dy * dy;
+
+    let dr = a.0 as i64 - b.0 as i64;
+    let dg = a.1 as i64 - b.1 as i64;
+    let db = a.2 as i64 - b.2 as i64;
+    let color = dr * dr + dg * dg + db * db;
+
+    let weighted_spatial = spatial * spatial_weight;
+    color * color_weight + weighted_spatial * weighted_spatial
 }
 
 struct ImgDiffWeights<'a> {
-    source: Vec<(u8, u8, u8)>,
-    target: Vec<(u8, u8, u8)>,
-    weights: Vec<i64>,
-    sidelen: usize,
+    source: &'a [GridPixel],
+    target: &'a [WeightedPixel],
     settings: &'a GenerationSettings,
 }
 
@@ -61,17 +65,14 @@ impl Weights<i64> for ImgDiffWeights<'_> {
 
     #[inline(always)]
     fn at(&self, row: usize, col: usize) -> i64 {
-        let (x1, y1) = (row % self.sidelen, row / self.sidelen);
-        let (x2, y2) = (col % self.sidelen, col / self.sidelen);
-        let (r1, g1, b1) = self.target[row];
-        let (r2, g2, b2) = self.source[col];
-        let weight = self.weights[row];
+        let target = self.target[row];
+        let source = self.source[col];
         -heuristic(
-            (x1 as u16, y1 as u16),
-            (x2 as u16, y2 as u16),
-            (r1, g1, b1),
-            (r2, g2, b2),
-            weight,
+            target.coords(),
+            source.coords(),
+            target.rgb_tuple(),
+            source.rgb_tuple(),
+            target.weight,
             self.settings.proximity_importance,
         )
     }
@@ -123,13 +124,11 @@ pub fn process_optimal<S: ProgressSink>(
     )
     .unwrap();
     // let start_time = std::time::Instant::now();
-    let (source_pixels, target_pixels, weights) = util::get_images(source_img, &settings)?;
+    let (source_pixels, target_pixels) = util::get_images(source_img, &settings)?;
 
     let weights = ImgDiffWeights {
-        source: source_pixels.clone(),
-        target: target_pixels,
-        weights,
-        sidelen: settings.sidelen as usize,
+        source: &source_pixels,
+        target: &target_pixels,
         settings: &settings,
     };
 
@@ -158,6 +157,7 @@ pub fn process_optimal<S: ProgressSink>(
         let mut alternating = Vec::with_capacity(ny);
         let mut slack = vec![0; ny];
         let mut slackx = Vec::with_capacity(ny);
+        let mut assignment_preview = vec![0usize; nx];
         for root in 0..nx {
             alternating.clear();
             alternating.resize(ny, None);
@@ -248,14 +248,10 @@ pub fn process_optimal<S: ProgressSink>(
 
                 tx.send(ProgressMsg::Progress(root as f32 / nx as f32));
 
-                let data = make_new_img(
-                    &source_pixels,
-                    &xy.clone()
-                        .into_iter()
-                        .map(|a| a.unwrap_or(0))
-                        .collect::<Vec<_>>(),
-                    settings.sidelen,
-                );
+                for (slot, value) in assignment_preview.iter_mut().zip(xy.iter()) {
+                    *slot = value.unwrap_or(0);
+                }
+                let data = make_new_img(&source_pixels, &assignment_preview, settings.sidelen);
 
                 tx.send(ProgressMsg::UpdatePreview {
                     width: settings.sidelen,
@@ -279,12 +275,9 @@ pub fn process_optimal<S: ProgressSink>(
             name: unprocessed.name,
             width: settings.sidelen,
             height: settings.sidelen,
-            source_img: source_pixels
-                .into_iter()
-                .flat_map(|(r, g, b)| [r, g, b])
-                .collect(),
+            source_img: source_pixels.into_iter().flat_map(|p| p.rgb).collect(),
         },
-        assignments: assignments.clone(),
+        assignments,
     }));
 
     // println!(
@@ -294,10 +287,10 @@ pub fn process_optimal<S: ProgressSink>(
     Ok(())
 }
 
-fn make_new_img(source_pixels: &[(u8, u8, u8)], assignments: &[usize], sidelen: u32) -> Vec<u8> {
+fn make_new_img(source_pixels: &[GridPixel], assignments: &[usize], sidelen: u32) -> Vec<u8> {
     let mut img = vec![0; (sidelen * sidelen * 3) as usize];
     for (target_idx, source_idx) in assignments.iter().enumerate() {
-        let (r, g, b) = source_pixels[*source_idx];
+        let [r, g, b] = source_pixels[*source_idx].rgb;
         let base = target_idx * 3;
         img[base] = r;
         img[base + 1] = g;
@@ -308,20 +301,13 @@ fn make_new_img(source_pixels: &[(u8, u8, u8)], assignments: &[usize], sidelen: 
 
 #[derive(Clone, Copy)]
 struct Pixel {
-    src_x: u16,
-    src_y: u16,
-    rgb: (u8, u8, u8),
+    tile: GridPixel,
     h: i64, // current heuristic value
 }
 
 impl Pixel {
-    fn new(src_x: u16, src_y: u16, rgb: (u8, u8, u8), h: i64) -> Self {
-        Self {
-            src_x,
-            src_y,
-            rgb,
-            h,
-        }
+    fn new(tile: GridPixel, h: i64) -> Self {
+        Self { tile, h }
     }
 
     fn update_heuristic(&mut self, new_h: i64) {
@@ -329,19 +315,13 @@ impl Pixel {
     }
 
     #[inline(always)]
-    fn calc_heuristic(
-        &self,
-        target_pos: (u16, u16),
-        target_col: (u8, u8, u8),
-        weight: i64,
-        proximity_importance: i64,
-    ) -> i64 {
+    fn calc_heuristic(&self, target: WeightedPixel, proximity_importance: i64) -> i64 {
         heuristic(
-            (self.src_x, self.src_y),
-            target_pos,
-            self.rgb,
-            target_col,
-            weight,
+            self.tile.coords(),
+            target.coords(),
+            self.tile.rgb_tuple(),
+            target.rgb_tuple(),
+            target.weight,
             proximity_importance,
         )
     }
@@ -362,21 +342,14 @@ pub fn process_genetic<S: ProgressSink>(
     )
     .unwrap();
     // let start_time = std::time::Instant::now();
-    let (source_pixels, target_pixels, weights) = util::get_images(source_img, &settings)?;
+    let (source_pixels, target_pixels) = util::get_images(source_img, &settings)?;
 
     let mut pixels = source_pixels
         .iter()
         .enumerate()
-        .map(|(i, &(r, g, b))| {
-            let x = (i as u32 % settings.sidelen) as u16;
-            let y = (i as u32 / settings.sidelen) as u16;
-            let mut p = Pixel::new(x, y, (r, g, b), 0);
-            let h = p.calc_heuristic(
-                (x, y),
-                target_pixels[i],
-                weights[i],
-                settings.proximity_importance,
-            );
+        .map(|(i, &tile)| {
+            let mut p = Pixel::new(tile, 0);
+            let h = p.calc_heuristic(target_pixels[i], settings.proximity_importance);
             p.update_heuristic(h);
             p
         })
@@ -384,42 +357,40 @@ pub fn process_genetic<S: ProgressSink>(
 
     let mut rng = frand::Rand::with_seed(12345);
     let swaps_per_generation = SWAPS_PER_GENERATION_PER_PIXEL * pixels.len();
+    let sidelen = settings.sidelen;
+    let sidelen_u16 = sidelen as u16;
+    let sidelen_i16 = sidelen_u16 as i16;
 
-    let mut max_dist = settings.sidelen;
+    let mut assignments = pixels
+        .iter()
+        .map(|p| p.tile.linear_index(sidelen))
+        .collect::<Vec<_>>();
+
+    let mut max_dist = sidelen;
     loop {
         let mut swaps_made = 0;
         for _ in 0..swaps_per_generation {
             let apos = rng.gen_range(0..pixels.len() as u32) as usize;
-            let ax = apos as u16 % settings.sidelen as u16;
-            let ay = apos as u16 / settings.sidelen as u16;
-            let bx = (ax as i16 + rng.gen_range(-(max_dist as i16)..(max_dist as i16 + 1)))
-                .clamp(0, settings.sidelen as i16 - 1) as u16;
-            let by = (ay as i16 + rng.gen_range(-(max_dist as i16)..(max_dist as i16 + 1)))
-                .clamp(0, settings.sidelen as i16 - 1) as u16;
-            let bpos = by as usize * settings.sidelen as usize + bx as usize;
+            let ax = apos as u16 % sidelen_u16;
+            let ay = apos as u16 / sidelen_u16;
+            let range = -(max_dist as i16)..(max_dist as i16 + 1);
+            let bx = (ax as i16 + rng.gen_range(range.clone())).clamp(0, sidelen_i16 - 1) as u16;
+            let by = (ay as i16 + rng.gen_range(range)).clamp(0, sidelen_i16 - 1) as u16;
+            let bpos = by as usize * sidelen as usize + bx as usize;
 
             let t_a = target_pixels[apos];
             let t_b = target_pixels[bpos];
 
-            let a_on_b_h = pixels[apos].calc_heuristic(
-                (bx, by),
-                t_b,
-                weights[bpos],
-                settings.proximity_importance,
-            );
+            let a_on_b_h = pixels[apos].calc_heuristic(t_b, settings.proximity_importance);
 
-            let b_on_a_h = pixels[bpos].calc_heuristic(
-                (ax, ay),
-                t_a,
-                weights[apos],
-                settings.proximity_importance,
-            );
+            let b_on_a_h = pixels[bpos].calc_heuristic(t_a, settings.proximity_importance);
 
             let improvement_a = pixels[apos].h - b_on_a_h;
             let improvement_b = pixels[bpos].h - a_on_b_h;
             if improvement_a + improvement_b > 0 {
                 // swap
                 pixels.swap(apos, bpos);
+                assignments.swap(apos, bpos);
                 pixels[apos].update_heuristic(b_on_a_h);
                 pixels[bpos].update_heuristic(a_on_b_h);
                 swaps_made += 1;
@@ -435,10 +406,6 @@ pub fn process_genetic<S: ProgressSink>(
             }
         }
 
-        let assignments = pixels
-            .iter()
-            .map(|p| p.src_y as usize * settings.sidelen as usize + p.src_x as usize)
-            .collect::<Vec<_>>();
         //debug_print(format!("max_dist = {max_dist}, swaps made = {swaps_made}"));
         if max_dist < 4 && swaps_made < 10 {
             //let dir_name = util::save_result(target, base_name, source, assignments, img)?;
@@ -447,12 +414,9 @@ pub fn process_genetic<S: ProgressSink>(
                     name: unprocessed.name,
                     width: settings.sidelen,
                     height: settings.sidelen,
-                    source_img: source_pixels
-                        .iter()
-                        .flat_map(|(r, g, b)| [*r, *g, *b])
-                        .collect(),
+                    source_img: source_pixels.iter().flat_map(|p| p.rgb).collect(),
                 },
-                assignments: assignments.clone(),
+                assignments,
             }));
             return Ok(());
         }
