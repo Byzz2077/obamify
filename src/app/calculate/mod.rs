@@ -126,6 +126,13 @@ pub fn process_optimal<S: ProgressSink>(
     // let start_time = std::time::Instant::now();
     let (source_pixels, target_pixels) = util::get_images(source_img, &settings)?;
 
+    let sidelen = settings.sidelen as usize;
+    let source_positions: Vec<_> = (0..source_pixels.len())
+        .map(|idx| ((idx % sidelen) as u16, (idx / sidelen) as u16))
+        .collect();
+    let target_positions: Vec<_> = (0..target_pixels.len())
+        .map(|idx| ((idx % sidelen) as u16, (idx / sidelen) as u16))
+        .collect();
     let weights = ImgDiffWeights {
         source: &source_pixels,
         target: &target_pixels,
