@@ -126,13 +126,6 @@ pub fn process_optimal<S: ProgressSink>(
     // let start_time = std::time::Instant::now();
     let (source_pixels, target_pixels) = util::get_images(source_img, &settings)?;
 
-    let sidelen = settings.sidelen as usize;
-    let source_positions: Vec<_> = (0..source_pixels.len())
-        .map(|idx| ((idx % sidelen) as u16, (idx / sidelen) as u16))
-        .collect();
-    let target_positions: Vec<_> = (0..target_pixels.len())
-        .map(|idx| ((idx % sidelen) as u16, (idx / sidelen) as u16))
-        .collect();
     let weights = ImgDiffWeights {
         source: &source_pixels,
         target: &target_pixels,
@@ -284,7 +277,7 @@ pub fn process_optimal<S: ProgressSink>(
             height: settings.sidelen,
             source_img: source_pixels.into_iter().flat_map(|p| p.rgb).collect(),
         },
-        assignments: assignments.clone(),
+        assignments,
     }));
 
     // println!(
@@ -368,6 +361,11 @@ pub fn process_genetic<S: ProgressSink>(
     let sidelen_u16 = sidelen as u16;
     let sidelen_i16 = sidelen_u16 as i16;
 
+    let mut assignments = pixels
+        .iter()
+        .map(|p| p.tile.linear_index(sidelen))
+        .collect::<Vec<_>>();
+
     let mut max_dist = sidelen;
     loop {
         let mut swaps_made = 0;
@@ -392,6 +390,7 @@ pub fn process_genetic<S: ProgressSink>(
             if improvement_a + improvement_b > 0 {
                 // swap
                 pixels.swap(apos, bpos);
+                assignments.swap(apos, bpos);
                 pixels[apos].update_heuristic(b_on_a_h);
                 pixels[bpos].update_heuristic(a_on_b_h);
                 swaps_made += 1;
@@ -407,10 +406,6 @@ pub fn process_genetic<S: ProgressSink>(
             }
         }
 
-        let assignments = pixels
-            .iter()
-            .map(|p| p.tile.linear_index(sidelen))
-            .collect::<Vec<_>>();
         //debug_print(format!("max_dist = {max_dist}, swaps made = {swaps_made}"));
         if max_dist < 4 && swaps_made < 10 {
             //let dir_name = util::save_result(target, base_name, source, assignments, img)?;
@@ -421,7 +416,7 @@ pub fn process_genetic<S: ProgressSink>(
                     height: settings.sidelen,
                     source_img: source_pixels.iter().flat_map(|p| p.rgb).collect(),
                 },
-                assignments: assignments.clone(),
+                assignments,
             }));
             return Ok(());
         }
